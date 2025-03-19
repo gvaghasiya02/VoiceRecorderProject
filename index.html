@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voice Recorder</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <style>
+      #recordButton.recording {
+        background-color: red !important;
+        animation: pulse 1s infinite;
+      }
+      @keyframes pulse {
+        0% {
+          transform: scale(1);
+        }
+        50% {
+          transform: scale(1.1);
+        }
+        100% {
+          transform: scale(1);
+        }
+      }
+      #logWindow {
+        max-height: 200px;
+        overflow-y: auto;
+        border: 1px solid #ccc;
+        padding: 10px;
+        margin-top: 20px;
+        background: #f8f9fa;
+      }
+    </style>
+  </head>
+  <body class="container py-5">
+    <div class="text-center">
+      <h1 class="mb-4">Voice Recorder</h1>
+      <p class="text-muted">
+        Click "Record" to start speaking. The recording will automatically stop
+        after 1 second of silence, send to the server, and continue listening
+        until "Stop Recording" is pressed.
+      </p>
+      <button id="recordButton" class="btn btn-primary">Record</button>
+      <button id="stopButton" class="btn btn-danger ms-2">
+        Stop Recording
+      </button>
+    </div>
+    <div id="logWindow" class="mt-4 p-3">
+      <strong>Logs:</strong>
+      <ul id="logList" class="list-unstyled"></ul>
+    </div>
+
+    <script>
+      let mediaRecorder;
+      let audioChunks = [];
+      let silenceTimer;
+      let isRecording = false;
+      let stream;
+      let hasVoiceData = false;
+      let lastSoundTime = Date.now();
+      let sessionId = "";
+
+      function generateSessionId() {
+        return Math.random().toString(36).substring(2, 10);
+      }
+
+      document
+        .getElementById("recordButton")
+        .addEventListener("click", async () => {
+          if (!isRecording) {
+            sessionId = generateSessionId();
+          }
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          startRecording();
+        });
+
+      document.getElementById("stopButton").addEventListener("click", () => {
+        if (mediaRecorder && isRecording) {
+          mediaRecorder.stop();
+          isRecording = false;
+          stream.getTracks().forEach((track) => track.stop());
+          logMessage("Recording manually stopped.");
+          document.getElementById("recordButton").classList.remove("recording");
+        }
+      });
+
+      function startRecording() {
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+        hasVoiceData = false;
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunks.push(event.data);
+            hasVoiceData = true;
+            lastSoundTime = Date.now();
+          }
+        };
+
+        mediaRecorder.onstop = () => {
+          if (hasVoiceData) {
+            const audioBlob = new Blob(audioChunks, { type: "audio/wav" });
+            sendAudioToServer(audioBlob);
+            logMessage("Recording segment saved and uploaded.");
+          } else {
+            logMessage("Silence detected. Skipping empty recording.");
+          }
+          audioChunks = [];
+          if (isRecording) {
+            startRecording();
+          }
+        };
+
+        mediaRecorder.start();
+        isRecording = true;
+        document.getElementById("recordButton").classList.add("recording");
+        logMessage("Recording started...");
+        listenForSilence();
+      }
+
+      function listenForSilence() {
+        const audioContext = new AudioContext();
+        const analyser = audioContext.createAnalyser();
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(analyser);
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+        function checkSilence() {
+          analyser.getByteFrequencyData(dataArray);
+          const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+          const currentTime = Date.now();
+
+          if (avg > 40) {
+            // sensitivity threshold for voice recording, higher value means less sensitive to any audio
+            lastSoundTime = currentTime;
+            clearTimeout(silenceTimer);
+            silenceTimer = null;
+          } else if (currentTime - lastSoundTime > 1000) {
+            // 1 second of silence then stop recording
+            if (mediaRecorder && isRecording) {
+              mediaRecorder.stop();
+              document
+                .getElementById("recordButton")
+                .classList.remove("recording");
+              logMessage("Silence detected for 1 second. Stopping recording.");
+            }
+          }
+
+          if (isRecording) {
+            requestAnimationFrame(checkSilence);
+          }
+        }
+        checkSilence();
+      }
+
+      function sendAudioToServer(audioBlob) {
+        const formData = new FormData();
+        formData.append(
+          "audio",
+          audioBlob,
+          `recording_${sessionId}_${Date.now()}.wav`
+        );
+
+        fetch("http://localhost:5000/upload", {
+          method: "POST",
+          body: formData,
+        })
+          .then((response) => response.json())
+          .then((data) => logMessage("File uploaded: " + data.filename))
+          .catch((error) => logMessage("Error uploading file: " + error));
+      }
+
+      function logMessage(message) {
+        const logList = document.getElementById("logList");
+        const logItem = document.createElement("li");
+        logItem.textContent = new Date().toLocaleTimeString() + " - " + message;
+        logList.prepend(logItem);
+      }
+    </script>
+  </body>
+</html>
